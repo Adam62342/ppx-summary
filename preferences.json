@@ -1,0 +1,23 @@
+[
+  {
+    "property": "mod.pplx-summarize.width",
+    "label": "Panel width (px)",
+    "type": "string",
+    "default": "420",
+    "defaultValue": "420"
+  },
+  {
+    "property": "mod.pplx-summarize.height",
+    "label": "Panel height (px)",
+    "type": "string",
+    "default": "600",
+    "defaultValue": "600"
+  },
+  {
+    "property": "mod.pplx-summarize.prompt",
+    "label": "Prompt (the page URL is appended)",
+    "type": "string",
+    "default": "Summarize this page into concise bullet points:",
+    "defaultValue": "Summarize this page into concise bullet points:"
+  }
+]
