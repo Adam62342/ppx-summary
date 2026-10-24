@@ -14,14 +14,41 @@
   contain: strict;
 }
 
+/* Collapse instead of display:none, so the mirrored page isn't torn down
+   every time the preview hides (e.g. while PiP is open). */
 .dvp-preview[hidden] {
-  display: none;
+  display: block;
+  visibility: hidden;
+  height: 0 !important;
+  margin-bottom: 0;
+  box-shadow: none;
+}
+
+.dvp-canvas,
+.dvp-mirror,
+.dvp-shield {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: none;
 }
 
 .dvp-canvas {
   display: block;
-  width: 100%;
-  height: 100%;
+}
+
+.dvp-preview[mode="mirror"] .dvp-canvas {
+  display: none;
+}
+
+.dvp-mirror {
+  pointer-events: none;
+  background: #000;
+}
+
+.dvp-shield {
+  z-index: 1;
 }
 
 .dvp-preview:hover {
