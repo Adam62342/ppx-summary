@@ -18,7 +18,6 @@
 
   const HTML_NS = "http://www.w3.org/1999/xhtml";
   const PREF = "mod.diavideo.";
-  const BG_DECODE_PREF = "media.suspend-bkgnd-video.enabled";
 
   const pref = (name, def) => {
     try {
@@ -77,7 +76,6 @@
   let ctx = null;
   let preview = null; // { tab, browser, rect, lastSeen, drawing, timer, rectTimer }
   let autoPipTab = null; // tab we opened PiP for on app switch
-  let savedDecodePref = null;
   let barObserver = null;
 
   const mediaBar = () => document.getElementById("zen-media-controls-toolbar");
@@ -315,32 +313,54 @@
     if (preview) scheduleFrame(0);
   }
 
-  // ---- Background video decoding ------------------------------------------
-  // Firefox stops drawing frames for videos in background tabs after a few
-  // seconds, which would freeze the preview.
-  function applyDecodePref() {
-    if (pref("keep_decoding", true)) {
-      if (savedDecodePref === null) {
-        savedDecodePref = Services.prefs.prefHasUserValue(BG_DECODE_PREF)
-          ? Services.prefs.getBoolPref(BG_DECODE_PREF)
-          : "default";
+  // ---- Overridden Firefox prefs ---------------------------------------------
+  // - Background decoding: Firefox stops drawing frames for videos in
+  //   background tabs after a few seconds, which would freeze the preview.
+  // - Tab-switch PiP: Firefox (on by default in Zen) jumps straight to PiP
+  //   when you leave a video tab, skipping the sidebar preview. This mod
+  //   takes over that moment: preview on tab switch, PiP on app switch.
+  // Original values are restored when the mod is turned off.
+  const OVERRIDES = [
+    { modPref: "keep_decoding", pref: "media.suspend-bkgnd-video.enabled", value: false },
+    {
+      modPref: "preview",
+      pref: "media.videocontrols.picture-in-picture.enable-when-switching-tabs.enabled",
+      value: false,
+    },
+  ];
+  const saved = new Map(); // firefox pref -> original value, or "default"
+
+  function applyOverrides() {
+    for (const { modPref, pref: name, value } of OVERRIDES) {
+      if (pref(modPref, true)) {
+        if (!saved.has(name)) {
+          saved.set(
+            name,
+            Services.prefs.prefHasUserValue(name) ? Services.prefs.getBoolPref(name) : "default"
+          );
+        }
+        Services.prefs.setBoolPref(name, value);
+      } else {
+        restoreOverride(name);
       }
-      Services.prefs.setBoolPref(BG_DECODE_PREF, false);
-    } else {
-      restoreDecodePref();
     }
   }
 
-  function restoreDecodePref() {
-    if (savedDecodePref === null) return;
-    if (savedDecodePref === "default") Services.prefs.clearUserPref(BG_DECODE_PREF);
-    else Services.prefs.setBoolPref(BG_DECODE_PREF, savedDecodePref);
-    savedDecodePref = null;
+  function restoreOverride(name) {
+    if (!saved.has(name)) return;
+    const original = saved.get(name);
+    saved.delete(name);
+    if (original === "default") Services.prefs.clearUserPref(name);
+    else Services.prefs.setBoolPref(name, original);
+  }
+
+  function restoreOverrides() {
+    for (const name of [...saved.keys()]) restoreOverride(name);
   }
 
   const prefObserver = {
     observe() {
-      applyDecodePref();
+      applyOverrides();
       if (!pref("preview", true)) stopPreview();
       updateVisibility();
     },
@@ -365,7 +385,7 @@
     window.addEventListener("activate", onActivate);
     window.addEventListener("resize", onResize);
     Services.prefs.addObserver(PREF, prefObserver);
-    applyDecodePref();
+    applyOverrides();
 
     window.DiaVideoPreview = {
       get state() {
@@ -381,7 +401,7 @@
         window.removeEventListener("activate", onActivate);
         window.removeEventListener("resize", onResize);
         Services.prefs.removeObserver(PREF, prefObserver);
-        restoreDecodePref();
+        restoreOverrides();
         barObserver?.disconnect();
         el?.remove();
         el = null;
