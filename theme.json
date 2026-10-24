@@ -1,0 +1,19 @@
+{
+  "id": "dia-video-preview",
+  "name": "Dia Video Preview",
+  "description": "Shows the live video above Zen's sidebar media player when you switch away from a video tab, and opens Picture-in-Picture when you switch to another app.",
+  "version": "1.0.0",
+  "author": "you",
+  "homepage": "",
+  "readme": "README.md",
+  "preferences": "preferences.json",
+  "style": {
+    "chrome": "dia-video-preview.css"
+  },
+  "scripts": {
+    "dia-video-preview.uc.js": {
+      "include": ["chrome://browser/content/browser.xhtml"]
+    }
+  },
+  "tags": ["media", "video", "pip", "sidebar"]
+}

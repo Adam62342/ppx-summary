@@ -1,0 +1,38 @@
+[
+  {
+    "property": "mod.diavideo.preview",
+    "label": "Show the live video above the sidebar media player",
+    "type": "checkbox",
+    "default": true
+  },
+  {
+    "property": "mod.diavideo.auto_pip",
+    "label": "Open Picture-in-Picture when you switch to another app",
+    "type": "checkbox",
+    "default": true
+  },
+  {
+    "property": "mod.diavideo.pip_current_tab",
+    "label": "…also for a video playing in the tab you're on",
+    "type": "checkbox",
+    "default": false
+  },
+  {
+    "property": "mod.diavideo.close_pip_on_return",
+    "label": "Close that Picture-in-Picture when you come back to Zen",
+    "type": "checkbox",
+    "default": true
+  },
+  {
+    "property": "mod.diavideo.keep_decoding",
+    "label": "Keep background videos playing frames (needed for a live preview; uses a bit more battery)",
+    "type": "checkbox",
+    "default": true
+  },
+  {
+    "property": "mod.diavideo.fps",
+    "label": "Preview frame rate",
+    "type": "string",
+    "default": "24"
+  }
+]
