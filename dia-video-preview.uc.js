@@ -15,6 +15,7 @@
   const NO_VIDEO_GRACE_MS = 2500; // how long a missing video is tolerated
   const MAX_HEIGHT = 220; // tallest the preview gets in the sidebar
   const APP_SWITCH_CHECK_MS = 80; // let focus settle before deciding
+  const RETURN_POLL_MS = 250; // how often to check for a return while our PiP is up
 
   const HTML_NS = "http://www.w3.org/1999/xhtml";
   const PREF = "mod.diavideo.";
@@ -269,7 +270,10 @@
 
   function onTabClose(e) {
     if (preview?.tab === e.target) stopPreview();
-    if (autoPipTab === e.target) autoPipTab = null;
+    if (autoPipTab === e.target) {
+      autoPipTab = null;
+      stopWatchingForReturn();
+    }
     if (pendingStart === e.target) pendingStart = null;
   }
 
@@ -301,16 +305,46 @@
       if (Services.focus.activeWindow) return;
       const tab = pipCandidate();
       if (!tab || inPip(tab)) return;
-      if (togglePip(tab)) autoPipTab = tab;
+      if (togglePip(tab)) {
+        autoPipTab = tab;
+        watchForReturn();
+      }
     }, APP_SWITCH_CHECK_MS);
   }
 
-  function onActivate() {
+  // Coming back to Zen often focuses the PiP window rather than this one
+  // (it's the frontmost Zen window), so this window never gets "activate".
+  // While our PiP is up, watch for *any* Zen window becoming active instead.
+  let returnWatch = 0;
+  function watchForReturn() {
+    clearInterval(returnWatch);
+    returnWatch = setInterval(() => {
+      if (!autoPipTab) return stopWatchingForReturn();
+      if (Services.focus.activeWindow) onReturn();
+    }, RETURN_POLL_MS);
+  }
+
+  function stopWatchingForReturn() {
+    clearInterval(returnWatch);
+    returnWatch = 0;
+  }
+
+  function onReturn() {
+    stopWatchingForReturn();
     const tab = autoPipTab;
     autoPipTab = null;
-    if (tab && pref("close_pip_on_return", true) && inPip(tab)) togglePip(tab);
+    if (tab && pref("close_pip_on_return", true) && inPip(tab)) {
+      togglePip(tab);
+      // Bring the main window forward in place of the closing PiP window.
+      if (Services.focus.activeWindow !== window) window.focus();
+    }
     // The preview pauses while Zen isn't focused; pick it back up.
     if (preview) scheduleFrame(0);
+  }
+
+  function onActivate() {
+    if (autoPipTab) onReturn();
+    else if (preview) scheduleFrame(0);
   }
 
   // ---- Overridden Firefox prefs ---------------------------------------------
@@ -393,6 +427,7 @@
       },
       uninit() {
         stopPreview();
+        stopWatchingForReturn();
         window.messageManager.removeDelayedFrameScript(FRAME_SCRIPT_URL);
         window.messageManager.removeMessageListener("DiaVideo:Rect", onRect);
         window.removeEventListener("TabSelect", onTabSelect);
