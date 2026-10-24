@@ -289,7 +289,7 @@
   function pipCandidate() {
     if (preview && isPlaying(preview.tab)) return preview.tab;
     const selected = gBrowser.selectedTab;
-    if (pref("pip_current_tab", false) && isPlaying(selected)) return selected;
+    if (pref("pip_current_tab", true) && isPlaying(selected)) return selected;
     return null;
   }
 
