@@ -35,8 +35,11 @@
   };
 
   // ---- Content helper -----------------------------------------------------
-  // Runs in each tab and reports where the main video's picture sits on
-  // screen (viewport coordinates), so we can snapshot exactly that area.
+  // Runs in each tab. It finds the main video and reports its shape and
+  // position, and it can mirror that video into the sidebar preview the way
+  // Picture-in-Picture does: cloneElementVisually() hands the same decoded
+  // frames to a second <video>, with no copying. The preview's page lives in
+  // the same process as this tab, so we can reach it directly.
   const FRAME_SCRIPT = `
 (() => {
   const MIN_AREA = 120 * 68;
@@ -63,10 +66,47 @@
     }
     return { x: r.left + (r.width - w) / 2, y: r.top + (r.height - h) / 2, w, h };
   }
+
+  let mirror = null; // { source, target, targetId }
+  function unmirror() {
+    if (!mirror) return;
+    try { mirror.source.stopCloningElementVisually(); } catch (e) {}
+    try { mirror.target.remove(); } catch (e) {}
+    mirror = null;
+  }
+  function doMirror(targetId, attempt) {
+    const v = pick();
+    if (!v) return sendAsyncMessage("DiaVideo:MirrorResult", { ok: false, error: "no video" });
+    let doc = null;
+    try { doc = BrowsingContext.get(targetId)?.window?.document; } catch (e) {}
+    if (!doc || !doc.documentElement) {
+      // The preview's blank page may still be getting created.
+      if (attempt < 40) return content.setTimeout(() => doMirror(targetId, attempt + 1), 50);
+      return sendAsyncMessage("DiaVideo:MirrorResult", { ok: false, error: "preview page unavailable" });
+    }
+    unmirror();
+    const root = doc.body || doc.documentElement;
+    doc.documentElement.style.cssText = "background:#000;";
+    root.style.cssText = "margin:0;background:#000;overflow:hidden;";
+    const target = doc.createElement("video");
+    target.style.cssText = "position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000;";
+    root.appendChild(target);
+    mirror = { source: v, target, targetId };
+    v.cloneElementVisually(target).then(
+      () => sendAsyncMessage("DiaVideo:MirrorResult", { ok: true }),
+      e => { unmirror(); sendAsyncMessage("DiaVideo:MirrorResult", { ok: false, error: String(e) }); }
+    );
+  }
+
   addMessageListener("DiaVideo:Query", () => {
     const v = pick();
+    // The site swapped its video element (next episode, ad, etc.): follow it.
+    if (mirror && v && v !== mirror.source) doMirror(mirror.targetId, 0);
     sendAsyncMessage("DiaVideo:Rect", v ? Object.assign(pictureRect(v), { paused: v.paused }) : null);
   });
+  addMessageListener("DiaVideo:Mirror", ({ data }) => doMirror(data.id, 0));
+  addMessageListener("DiaVideo:Unmirror", unmirror);
+  addEventListener("pagehide", e => { if (e.target === content.document) unmirror(); });
 })();
 `;
   const FRAME_SCRIPT_URL = "data:application/javascript;charset=utf-8," + encodeURIComponent(FRAME_SCRIPT);
@@ -75,7 +115,7 @@
   let el = null; // preview container
   let canvas = null;
   let ctx = null;
-  let preview = null; // { tab, browser, rect, lastSeen, drawing, timer, rectTimer }
+  let preview = null; // { tab, browser, mode, mirrorBrowser, rect, lastSeen, drawing, timer, rectTimer }
   let autoPipTab = null; // tab we opened PiP for on app switch
   let barObserver = null;
 
@@ -97,6 +137,10 @@
     el.hidden = true;
     el.title = "Go to video";
     el.appendChild(canvas);
+    // Sits on top of the mirrored page so clicks reach us, not the page.
+    const shield = document.createElementNS(HTML_NS, "div");
+    shield.className = "dvp-shield";
+    el.appendChild(shield);
     el.addEventListener("click", () => {
       if (preview?.tab) selectTab(preview.tab);
     });
@@ -133,6 +177,8 @@
     const show = shouldShow();
     if (el.hidden === !show) return;
     el.hidden = !show;
+    // Only render the mirror while it can be seen.
+    if (preview?.mirrorBrowser) setMirrorActive(show);
     if (show) {
       sizeCanvas();
       scheduleFrame(0);
@@ -157,7 +203,7 @@
 
   // ---- Frame loop -----------------------------------------------------------
   function scheduleFrame(delay) {
-    if (!preview) return;
+    if (!preview || preview.mode !== "snapshot") return;
     clearTimeout(preview.timer);
     preview.timer = setTimeout(drawFrame, delay);
   }
@@ -230,26 +276,94 @@
 
   let pendingStart = null;
 
+  // ---- Mirror (PiP-style) ---------------------------------------------------
+  // A tiny blank page in the sidebar, created in the same process as the video
+  // tab (the same trick Firefox's PiP player uses), for the tab to mirror its
+  // video into.
+  function createMirror(tab) {
+    const src = tab.linkedBrowser;
+    const group = src.browsingContext?.group?.id;
+    if (!src.remoteType || !group) return null;
+    const b = document.createXULElement("browser");
+    b.className = "dvp-mirror";
+    b.setAttribute("type", "content");
+    b.setAttribute("remote", "true");
+    b.setAttribute("nodefaultsrc", "true");
+    b.setAttribute("disableglobalhistory", "true");
+    b.setAttribute("tabindex", "-1");
+    b.setAttribute("remoteType", src.remoteType);
+    b.setAttribute("initialBrowsingContextGroupId", group);
+    el.insertBefore(b, el.firstChild);
+    return b;
+  }
+
+  function setMirrorActive(active) {
+    try {
+      preview.mirrorBrowser.docShellIsActive = active;
+    } catch (e) {}
+  }
+
+  function onMirrorResult(msg) {
+    if (!preview || preview.browser !== msg.target || preview.mode !== "connecting") return;
+    if (msg.data?.ok) {
+      preview.mode = "mirror";
+      el.setAttribute("mode", "mirror");
+    } else {
+      console.warn("Dia Video Preview: mirroring unavailable, using snapshots", msg.data?.error);
+      useSnapshots();
+    }
+  }
+
+  function useSnapshots() {
+    preview.mirrorBrowser?.remove();
+    preview.mirrorBrowser = null;
+    preview.mode = "snapshot";
+    el.setAttribute("mode", "snapshot");
+    scheduleFrame(0);
+  }
+
   function startPreview(tab, rect) {
     stopPreview();
     if (!el && !build()) return;
     preview = {
       tab,
       browser: tab.linkedBrowser,
+      mode: "connecting",
+      mirrorBrowser: null,
       rect,
       lastSeen: performance.now(),
       drawing: false,
       timer: 0,
       rectTimer: setInterval(() => preview && query(preview.browser), RECT_REFRESH_MS),
     };
+    el.setAttribute("mode", "mirror");
     sizeCanvas();
     updateVisibility();
+
+    const mirror = createMirror(tab);
+    if (!mirror) return useSnapshots();
+    preview.mirrorBrowser = mirror;
+    setMirrorActive(!el.hidden);
+    try {
+      tab.linkedBrowser.messageManager.sendAsyncMessage("DiaVideo:Mirror", { id: mirror.browsingContext.id });
+    } catch (e) {
+      return useSnapshots();
+    }
+    // If the tab never answers, fall back rather than show a black box.
+    const p = preview;
+    setTimeout(() => {
+      if (preview === p && p.mode === "connecting") useSnapshots();
+    }, 3000);
   }
 
   function stopPreview() {
     if (!preview) return;
     clearTimeout(preview.timer);
     clearInterval(preview.rectTimer);
+    try {
+      preview.browser.messageManager?.sendAsyncMessage("DiaVideo:Unmirror");
+    } catch (e) {}
+    preview.mirrorBrowser?.remove();
     preview = null;
     if (el) el.hidden = true;
   }
@@ -410,6 +524,7 @@
 
   function init() {
     window.messageManager.addMessageListener("DiaVideo:Rect", onRect);
+    window.messageManager.addMessageListener("DiaVideo:MirrorResult", onMirrorResult);
     // Loads into every tab in this window, now and in future.
     window.messageManager.loadFrameScript(FRAME_SCRIPT_URL, true);
 
@@ -423,13 +538,17 @@
 
     window.DiaVideoPreview = {
       get state() {
-        return { preview: preview && { tab: preview.tab.label, rect: preview.rect }, autoPipTab: autoPipTab?.label };
+        return {
+          preview: preview && { tab: preview.tab.label, mode: preview.mode, rect: preview.rect },
+          autoPipTab: autoPipTab?.label,
+        };
       },
       uninit() {
         stopPreview();
         stopWatchingForReturn();
         window.messageManager.removeDelayedFrameScript(FRAME_SCRIPT_URL);
         window.messageManager.removeMessageListener("DiaVideo:Rect", onRect);
+        window.messageManager.removeMessageListener("DiaVideo:MirrorResult", onMirrorResult);
         window.removeEventListener("TabSelect", onTabSelect);
         window.removeEventListener("TabClose", onTabClose);
         window.removeEventListener("deactivate", onDeactivate);
