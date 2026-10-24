@@ -15,7 +15,7 @@
     "property": "mod.diavideo.pip_current_tab",
     "label": "…also for a video playing in the tab you're on",
     "type": "checkbox",
-    "default": false
+    "default": true
   },
   {
     "property": "mod.diavideo.close_pip_on_return",
