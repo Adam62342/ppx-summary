@@ -1,19 +1,29 @@
 {
-  "id": "dia-video-preview",
-  "name": "Dia Video Preview",
-  "description": "Shows the live video above Zen's sidebar media player when you switch away from a video tab, and opens Picture-in-Picture when you switch to another app.",
-  "version": "1.0.0",
+  "id": "page-summary",
+  "name": "Page Summary",
+  "version": "1.9.55",
+  "description": "A native-looking, Dia-style summary & chat panel. Press ⌘E/Ctrl+E to open; the page attaches as a card and selected text stacks on top. On YouTube it reads the video's captions so you can summarize or ask about the video, with optional [mm:ss] key moments.",
   "author": "you",
-  "homepage": "",
-  "readme": "README.md",
-  "preferences": "preferences.json",
+  "homepage": "https://github.com/YOUR_USERNAME/page-summary",
+  "tags": [
+    "chrome",
+    "ai",
+    "summary",
+    "sidebar"
+  ],
+  "fork": [
+    "zen"
+  ],
   "style": {
-    "chrome": "dia-video-preview.css"
+    "chrome": "chrome.css"
   },
+  "preferences": "preferences.json",
   "scripts": {
-    "dia-video-preview.uc.js": {
-      "include": ["chrome://browser/content/browser.xhtml"]
+    "page-summary.uc.js": {
+      "include": [
+        "chrome://browser/content/browser.xhtml"
+      ],
+      "loadOrder": 10
     }
-  },
-  "tags": ["media", "video", "pip", "sidebar"]
+  }
 }
