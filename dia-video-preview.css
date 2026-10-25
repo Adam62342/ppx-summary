@@ -47,6 +47,12 @@
   background: #000;
 }
 
+/* Kept laid out (so it can start up) but unseen until it's confirmed live;
+   snapshots show in the meantime. */
+.dvp-preview:not([mode="mirror"]) .dvp-mirror {
+  opacity: 0;
+}
+
 .dvp-shield {
   z-index: 1;
 }
