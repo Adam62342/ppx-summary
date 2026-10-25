@@ -35,13 +35,18 @@
   };
 
   // ---- Content helper -----------------------------------------------------
-  // Runs in each tab. It finds the main video and reports its shape and
-  // position, and it can mirror that video into the sidebar preview the way
-  // Picture-in-Picture does: cloneElementVisually() hands the same decoded
-  // frames to a second <video>, with no copying. The preview's page lives in
-  // the same process as this tab, so we can reach it directly.
+  // Runs in each tab, and in the preview's blank page in the sidebar.
+  // In a tab, it finds the main video and reports its shape and position.
+  // It can also hand that video over to the preview the way Firefox's
+  // Picture-in-Picture does: the tab passes a reference to the video, and the
+  // preview page (in the same process) looks it up and calls
+  // cloneElementVisually(), which shows the same decoded frames in a second
+  // <video>, with no copying.
   const FRAME_SCRIPT = `
 (() => {
+  const { ContentDOMReference } = ChromeUtils.importESModule(
+    "resource://gre/modules/ContentDOMReference.sys.mjs"
+  );
   const MIN_AREA = 120 * 68;
   function pick() {
     let best = null, bestScore = 0;
@@ -67,46 +72,60 @@
     return { x: r.left + (r.width - w) / 2, y: r.top + (r.height - h) / 2, w, h };
   }
 
-  let mirror = null; // { source, target, targetId }
-  function unmirror() {
+  // ---- In a tab: share the video ----
+  let shared = null; // the video handed to the preview
+  function share() {
+    const v = pick();
+    shared = v;
+    let ref = null;
+    try { if (v) ref = ContentDOMReference.get(v); } catch (e) {}
+    sendAsyncMessage("DiaVideo:Ref", ref);
+  }
+  addMessageListener("DiaVideo:Query", () => {
+    const v = pick();
+    // The site swapped its video element (next episode, ad, etc.): follow it.
+    if (shared && v && v !== shared) share();
+    sendAsyncMessage("DiaVideo:Rect", v ? Object.assign(pictureRect(v), { paused: v.paused }) : null);
+  });
+  addMessageListener("DiaVideo:Share", share);
+  addMessageListener("DiaVideo:Unshare", () => { shared = null; });
+
+  // ---- In the preview page: show the shared video ----
+  let mirror = null; // { source, target }
+  function detach() {
     if (!mirror) return;
     try { mirror.source.stopCloningElementVisually(); } catch (e) {}
     try { mirror.target.remove(); } catch (e) {}
     mirror = null;
   }
-  function doMirror(targetId, attempt) {
-    const v = pick();
-    if (!v) return sendAsyncMessage("DiaVideo:MirrorResult", { ok: false, error: "no video" });
-    let doc = null;
-    try { doc = BrowsingContext.get(targetId)?.window?.document; } catch (e) {}
-    if (!doc || !doc.documentElement) {
-      // The preview's blank page may still be getting created.
-      if (attempt < 40) return content.setTimeout(() => doMirror(targetId, attempt + 1), 50);
-      return sendAsyncMessage("DiaVideo:MirrorResult", { ok: false, error: "preview page unavailable" });
+  addMessageListener("DiaVideo:Attach", async ({ data }) => {
+    detach();
+    try {
+      const source = data && (await ContentDOMReference.resolve(data));
+      if (!source) throw new Error("video isn't in this process");
+      const doc = content.document;
+      let body = doc.body;
+      if (!body) {
+        body = doc.createElement("body");
+        doc.documentElement.appendChild(body);
+      }
+      doc.documentElement.style.cssText = "background:#000;";
+      body.style.cssText = "margin:0;background:#000;overflow:hidden;";
+      const target = doc.createElement("video");
+      target.style.cssText = "position:fixed;inset:0;width:100vw;height:100vh;object-fit:contain;background:#000;";
+      body.appendChild(target);
+      mirror = { source, target };
+      await source.cloneElementVisually(target);
+      sendAsyncMessage("DiaVideo:MirrorResult", { ok: true });
+    } catch (e) {
+      detach();
+      sendAsyncMessage("DiaVideo:MirrorResult", { ok: false, error: String(e) });
     }
-    unmirror();
-    const root = doc.body || doc.documentElement;
-    doc.documentElement.style.cssText = "background:#000;";
-    root.style.cssText = "margin:0;background:#000;overflow:hidden;";
-    const target = doc.createElement("video");
-    target.style.cssText = "position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000;";
-    root.appendChild(target);
-    mirror = { source: v, target, targetId };
-    v.cloneElementVisually(target).then(
-      () => sendAsyncMessage("DiaVideo:MirrorResult", { ok: true }),
-      e => { unmirror(); sendAsyncMessage("DiaVideo:MirrorResult", { ok: false, error: String(e) }); }
-    );
-  }
-
-  addMessageListener("DiaVideo:Query", () => {
-    const v = pick();
-    // The site swapped its video element (next episode, ad, etc.): follow it.
-    if (mirror && v && v !== mirror.source) doMirror(mirror.targetId, 0);
-    sendAsyncMessage("DiaVideo:Rect", v ? Object.assign(pictureRect(v), { paused: v.paused }) : null);
   });
-  addMessageListener("DiaVideo:Mirror", ({ data }) => doMirror(data.id, 0));
-  addMessageListener("DiaVideo:Unmirror", unmirror);
-  addEventListener("pagehide", e => { if (e.target === content.document) unmirror(); });
+  addMessageListener("DiaVideo:Detach", detach);
+
+  // Lets the window know this page is ready for messages.
+  sendAsyncMessage("DiaVideo:Hello");
 })();
 `;
   const FRAME_SCRIPT_URL = "data:application/javascript;charset=utf-8," + encodeURIComponent(FRAME_SCRIPT);
@@ -203,7 +222,7 @@
 
   // ---- Frame loop -----------------------------------------------------------
   function scheduleFrame(delay) {
-    if (!preview || preview.mode !== "snapshot") return;
+    if (!preview || preview.mode === "mirror") return;
     clearTimeout(preview.timer);
     preview.timer = setTimeout(drawFrame, delay);
   }
@@ -298,26 +317,69 @@
   }
 
   function setMirrorActive(active) {
+    const b = preview?.mirrorBrowser;
+    if (!b) return;
+    // Both are needed for a remote page to actually draw; either can throw
+    // while the page is still starting up, so this is retried once it's ready.
     try {
-      preview.mirrorBrowser.docShellIsActive = active;
+      b.docShellIsActive = active;
+    } catch (e) {}
+    try {
+      b.renderLayers = active;
     } catch (e) {}
   }
 
-  function onMirrorResult(msg) {
-    if (!preview || preview.browser !== msg.target || preview.mode !== "connecting") return;
-    if (msg.data?.ok) {
-      preview.mode = "mirror";
-      el.setAttribute("mode", "mirror");
-    } else {
-      console.warn("Dia Video Preview: mirroring unavailable, using snapshots", msg.data?.error);
-      useSnapshots();
+  // The tab sent a reference to its video.
+  function onRef(msg) {
+    if (!preview || preview.browser !== msg.target) return;
+    preview.ref = msg.data;
+    if (!msg.data) {
+      if (preview.mode !== "snapshot") useSnapshots("no video to share");
+      return;
+    }
+    attach();
+  }
+
+  // The preview's blank page has loaded our helper and can take messages.
+  function onHello(msg) {
+    if (!preview?.mirrorBrowser || preview.mirrorBrowser !== msg.target) return;
+    preview.mirrorReady = true;
+    setMirrorActive(!el.hidden);
+    attach();
+  }
+
+  function attach() {
+    const p = preview;
+    if (!p?.mirrorBrowser || !p.mirrorReady || !p.ref) return;
+    try {
+      p.mirrorBrowser.messageManager.sendAsyncMessage("DiaVideo:Attach", p.ref);
+    } catch (e) {
+      useSnapshots(String(e));
     }
   }
 
-  function useSnapshots() {
-    preview.mirrorBrowser?.remove();
-    preview.mirrorBrowser = null;
-    preview.mode = "snapshot";
+  function onMirrorResult(msg) {
+    if (!preview?.mirrorBrowser || preview.mirrorBrowser !== msg.target) return;
+    if (msg.data?.ok) {
+      preview.mode = "mirror";
+      el.setAttribute("mode", "mirror");
+      clearTimeout(preview.timer); // snapshots no longer needed
+      setMirrorActive(!el.hidden);
+    } else {
+      useSnapshots(msg.data?.error);
+    }
+  }
+
+  function useSnapshots(reason) {
+    const p = preview;
+    if (!p) return;
+    if (reason) console.warn("Dia Video Preview: mirroring unavailable, using snapshots:", reason);
+    try {
+      p.browser.messageManager?.sendAsyncMessage("DiaVideo:Unshare");
+    } catch (e) {}
+    p.mirrorBrowser?.remove();
+    p.mirrorBrowser = null;
+    p.mode = "snapshot";
     el.setAttribute("mode", "snapshot");
     scheduleFrame(0);
   }
@@ -328,31 +390,33 @@
     preview = {
       tab,
       browser: tab.linkedBrowser,
+      // "connecting" draws snapshots until the live mirror is confirmed.
       mode: "connecting",
       mirrorBrowser: null,
+      mirrorReady: false,
+      ref: null,
       rect,
       lastSeen: performance.now(),
       drawing: false,
       timer: 0,
       rectTimer: setInterval(() => preview && query(preview.browser), RECT_REFRESH_MS),
     };
-    el.setAttribute("mode", "mirror");
+    el.setAttribute("mode", "connecting");
     sizeCanvas();
     updateVisibility();
+    scheduleFrame(0);
 
-    const mirror = createMirror(tab);
-    if (!mirror) return useSnapshots();
-    preview.mirrorBrowser = mirror;
-    setMirrorActive(!el.hidden);
     try {
-      tab.linkedBrowser.messageManager.sendAsyncMessage("DiaVideo:Mirror", { id: mirror.browsingContext.id });
+      preview.mirrorBrowser = createMirror(tab);
+      if (!preview.mirrorBrowser) return useSnapshots("tab has no content process");
+      tab.linkedBrowser.messageManager.sendAsyncMessage("DiaVideo:Share");
     } catch (e) {
-      return useSnapshots();
+      return useSnapshots(String(e));
     }
-    // If the tab never answers, fall back rather than show a black box.
+    // If the mirror never connects, stay on snapshots rather than wait forever.
     const p = preview;
     setTimeout(() => {
-      if (preview === p && p.mode === "connecting") useSnapshots();
+      if (preview === p && p.mode === "connecting") useSnapshots("timed out connecting");
     }, 3000);
   }
 
@@ -361,7 +425,10 @@
     clearTimeout(preview.timer);
     clearInterval(preview.rectTimer);
     try {
-      preview.browser.messageManager?.sendAsyncMessage("DiaVideo:Unmirror");
+      preview.browser.messageManager?.sendAsyncMessage("DiaVideo:Unshare");
+    } catch (e) {}
+    try {
+      preview.mirrorBrowser?.messageManager?.sendAsyncMessage("DiaVideo:Detach");
     } catch (e) {}
     preview.mirrorBrowser?.remove();
     preview = null;
@@ -524,6 +591,8 @@
 
   function init() {
     window.messageManager.addMessageListener("DiaVideo:Rect", onRect);
+    window.messageManager.addMessageListener("DiaVideo:Ref", onRef);
+    window.messageManager.addMessageListener("DiaVideo:Hello", onHello);
     window.messageManager.addMessageListener("DiaVideo:MirrorResult", onMirrorResult);
     // Loads into every tab in this window, now and in future.
     window.messageManager.loadFrameScript(FRAME_SCRIPT_URL, true);
@@ -548,6 +617,8 @@
         stopWatchingForReturn();
         window.messageManager.removeDelayedFrameScript(FRAME_SCRIPT_URL);
         window.messageManager.removeMessageListener("DiaVideo:Rect", onRect);
+        window.messageManager.removeMessageListener("DiaVideo:Ref", onRef);
+        window.messageManager.removeMessageListener("DiaVideo:Hello", onHello);
         window.messageManager.removeMessageListener("DiaVideo:MirrorResult", onMirrorResult);
         window.removeEventListener("TabSelect", onTabSelect);
         window.removeEventListener("TabClose", onTabClose);
