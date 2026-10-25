@@ -147,7 +147,10 @@
   // ---- Preview element ------------------------------------------------------
   function build() {
     const bar = mediaBar();
-    if (!bar) return false;
+    if (!bar) {
+      console.warn("Dia Video Preview: Zen's media player (#zen-media-controls-toolbar) isn't in this window");
+      return false;
+    }
     canvas = document.createElementNS(HTML_NS, "canvas");
     canvas.className = "dvp-canvas";
     ctx = canvas.getContext("2d", { alpha: false });
@@ -604,6 +607,7 @@
     window.addEventListener("resize", onResize);
     Services.prefs.addObserver(PREF, prefObserver);
     applyOverrides();
+    console.log("Dia Video Preview: loaded", { mediaPlayer: !!mediaBar() });
 
     window.DiaVideoPreview = {
       get state() {
